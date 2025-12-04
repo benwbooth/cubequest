@@ -1,0 +1,9 @@
+[package]
+name = "music"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+note_macro = { path = "../note_macro" }
+genawaiter = "0.99"
+async-recursion = "1.0"
