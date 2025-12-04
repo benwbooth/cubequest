@@ -405,9 +405,9 @@ struct Game {
 impl Game {
     async fn new() -> Self {
         // Try to load music
-        let music_samples = load_music_samples("music.sf2");
+        let music_samples = load_music_samples("SC55_zzdenis_v0.5.sf2");
         if music_samples.is_none() {
-            eprintln!("Failed to load music - check music.sf2 exists");
+            eprintln!("Failed to load music - check SC55_zzdenis_v0.5.sf2 exists");
         }
 
         // Create SFX library with music

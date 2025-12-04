@@ -1,22 +1,29 @@
 #!/bin/bash
 
-# Download Phoenix MT-32 SoundFont
-OUTPUT_FILE="music.sf2"
-URL="https://musical-artifacts.com/artifacts/1481/Phoenix_MT-32.sf2"
+# Roland SC-55 SoundFont (General MIDI compatible)
+SOUNDFONT="SC55_zzdenis_v0.5.sf2"
+URL="https://drive.google.com/file/d/1wdYpwoCka8r7ZuIzPn1CHy13_4aP9oSq/view"
 
-echo "Downloading Phoenix MT-32 SoundFont..."
-
-if command -v curl &> /dev/null; then
-    curl -fL -o "$OUTPUT_FILE" "$URL"
-else
-    wget -O "$OUTPUT_FILE" "$URL"
-fi
-
-if [ -f "$OUTPUT_FILE" ] && head -c 4 "$OUTPUT_FILE" | grep -q "RIFF"; then
-    echo ""
-    echo "Downloaded: $OUTPUT_FILE ($(du -h "$OUTPUT_FILE" | cut -f1))"
+if [ -f "$SOUNDFONT" ]; then
+    echo "SoundFont already exists: $SOUNDFONT"
     echo "Run the game with: cargo run --release"
-else
-    echo "Download failed"
-    exit 1
+    exit 0
 fi
+
+echo "Opening download page for SC-55 SoundFont..."
+echo ""
+echo "Please download the file and save it to:"
+echo "  $(pwd)/$SOUNDFONT"
+echo ""
+
+# Open URL in default browser
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    open "$URL"
+elif command -v xdg-open &> /dev/null; then
+    xdg-open "$URL"
+else
+    echo "Could not open browser. Please visit:"
+    echo "  $URL"
+fi
+
+echo "After downloading, run the game with: cargo run --release"

@@ -1228,6 +1228,182 @@ pub fn tempo(bpm: f32) -> Note {
     }
 }
 
+// =============================================================================
+// GENERAL MIDI PROGRAM NUMBERS
+// =============================================================================
+
+/// General MIDI program numbers (0-127)
+/// Compatible with SC-55, SC-88, and other GM-compliant sound modules
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum GM {
+    // Piano (0-7)
+    AcousticGrandPiano = 0,
+    BrightAcousticPiano = 1,
+    ElectricGrandPiano = 2,
+    HonkyTonkPiano = 3,
+    ElectricPiano1 = 4,
+    ElectricPiano2 = 5,
+    Harpsichord = 6,
+    Clavinet = 7,
+
+    // Chromatic Percussion (8-15)
+    Celesta = 8,
+    Glockenspiel = 9,
+    MusicBox = 10,
+    Vibraphone = 11,
+    Marimba = 12,
+    Xylophone = 13,
+    TubularBells = 14,
+    Dulcimer = 15,
+
+    // Organ (16-23)
+    DrawbarOrgan = 16,
+    PercussiveOrgan = 17,
+    RockOrgan = 18,
+    ChurchOrgan = 19,
+    ReedOrgan = 20,
+    Accordion = 21,
+    Harmonica = 22,
+    TangoAccordion = 23,
+
+    // Guitar (24-31)
+    AcousticGuitarNylon = 24,
+    AcousticGuitarSteel = 25,
+    ElectricGuitarJazz = 26,
+    ElectricGuitarClean = 27,
+    ElectricGuitarMuted = 28,
+    OverdrivenGuitar = 29,
+    DistortionGuitar = 30,
+    GuitarHarmonics = 31,
+
+    // Bass (32-39)
+    AcousticBass = 32,
+    ElectricBassFinger = 33,
+    ElectricBassPick = 34,
+    FretlessBass = 35,
+    SlapBass1 = 36,
+    SlapBass2 = 37,
+    SynthBass1 = 38,
+    SynthBass2 = 39,
+
+    // Strings (40-47)
+    Violin = 40,
+    Viola = 41,
+    Cello = 42,
+    Contrabass = 43,
+    TremoloStrings = 44,
+    PizzicatoStrings = 45,
+    OrchestralHarp = 46,
+    Timpani = 47,
+
+    // Ensemble (48-55)
+    StringEnsemble1 = 48,
+    StringEnsemble2 = 49,
+    SynthStrings1 = 50,
+    SynthStrings2 = 51,
+    ChoirAahs = 52,
+    VoiceOohs = 53,
+    SynthVoice = 54,
+    OrchestraHit = 55,
+
+    // Brass (56-63)
+    Trumpet = 56,
+    Trombone = 57,
+    Tuba = 58,
+    MutedTrumpet = 59,
+    FrenchHorn = 60,
+    BrassSection = 61,
+    SynthBrass1 = 62,
+    SynthBrass2 = 63,
+
+    // Reed (64-71)
+    SopranoSax = 64,
+    AltoSax = 65,
+    TenorSax = 66,
+    BaritoneSax = 67,
+    Oboe = 68,
+    EnglishHorn = 69,
+    Bassoon = 70,
+    Clarinet = 71,
+
+    // Pipe (72-79)
+    Piccolo = 72,
+    Flute = 73,
+    Recorder = 74,
+    PanFlute = 75,
+    BlownBottle = 76,
+    Shakuhachi = 77,
+    Whistle = 78,
+    Ocarina = 79,
+
+    // Synth Lead (80-87)
+    SquareLead = 80,
+    SawtoothLead = 81,
+    CalliopeLead = 82,
+    ChiffLead = 83,
+    CharangLead = 84,
+    VoiceLead = 85,
+    FifthsLead = 86,
+    BassAndLead = 87,
+
+    // Synth Pad (88-95)
+    NewAgePad = 88,
+    WarmPad = 89,
+    PolysynthPad = 90,
+    ChoirPad = 91,
+    BowedPad = 92,
+    MetallicPad = 93,
+    HaloPad = 94,
+    SweepPad = 95,
+
+    // Synth Effects (96-103)
+    Rain = 96,
+    Soundtrack = 97,
+    Crystal = 98,
+    Atmosphere = 99,
+    Brightness = 100,
+    Goblins = 101,
+    Echoes = 102,
+    SciFi = 103,
+
+    // Ethnic (104-111)
+    Sitar = 104,
+    Banjo = 105,
+    Shamisen = 106,
+    Koto = 107,
+    Kalimba = 108,
+    Bagpipe = 109,
+    Fiddle = 110,
+    Shanai = 111,
+
+    // Percussive (112-119)
+    TinkleBell = 112,
+    Agogo = 113,
+    SteelDrums = 114,
+    Woodblock = 115,
+    TaikoDrum = 116,
+    MelodicTom = 117,
+    SynthDrum = 118,
+    ReverseCymbal = 119,
+
+    // Sound Effects (120-127)
+    GuitarFretNoise = 120,
+    BreathNoise = 121,
+    Seashore = 122,
+    BirdTweet = 123,
+    TelephoneRing = 124,
+    Helicopter = 125,
+    Applause = 126,
+    Gunshot = 127,
+}
+
+impl From<GM> for u8 {
+    fn from(gm: GM) -> u8 {
+        gm as u8
+    }
+}
+
 /// Set MIDI channel (0-15)
 pub fn channel(ch: u8) -> Note {
     Note::Param {
@@ -1237,10 +1413,11 @@ pub fn channel(ch: u8) -> Note {
 }
 
 /// Set MIDI program/instrument (0-127)
-pub fn program(prog: u8) -> Note {
+/// Accepts either a u8 or a GM enum variant
+pub fn program(prog: impl Into<u8>) -> Note {
     Note::Param {
         key: "program".to_string(),
-        value: ParamValue::Number(prog as f32),
+        value: ParamValue::Number(prog.into() as f32),
     }
 }
 
@@ -2159,7 +2336,7 @@ pub mod prelude {
         // Frequency/sweep functions
         freq, freq_vel, sweep, sweep_vel,
         // Parameter functions
-        tempo, channel, program, velocity, gate, transpose, key, time_note,
+        tempo, channel, program, velocity, gate, transpose, key, time_note, GM,
         set_macro, clear_macro,
         // Synthesis parameters
         patch, duty, noise_type, instrument, volume,
@@ -2218,53 +2395,92 @@ pub mod prelude {
 pub mod compositions {
     use crate::*;
 
-    /// Atmospheric dungeon exploration music - dark and mysterious in D minor
+    /// Upbeat dungeon exploration music - Dragon Quest inspired adventure in D minor
     pub fn dungeon_ambient() -> Note {
-        // Bass line - low strings with slow root movement
+        // Driving drum beat - kick and snare pattern
+        let drums = ser![
+            program(GM::AcousticGrandPiano), // Ignored on drum channel
+            channel(9), // Percussion channel
+            velocity(0.9),
+            rep(8, ser![
+                // Kick on 1 and 3, snare on 2 and 4, hi-hat throughout
+                par![c2e, fs2e],  // Kick + closed hi-hat
+                fs2e,              // Hi-hat
+                par![d2e, fs2e],  // Snare + hi-hat
+                fs2e,              // Hi-hat
+                par![c2e, fs2e],  // Kick + hi-hat
+                fs2e,              // Hi-hat
+                par![d2e, fs2e],  // Snare + hi-hat
+                as2e,              // Open hi-hat
+            ]),
+        ];
+
+        // Punchy arpeggiated bass line
         let bass = ser![
-            program(48), // Strings
-            d2w, a2w, f2w, g2w,
-            d2w, bf2w, a2w, a2w,
+            program(GM::SynthBass1),
+            velocity(0.85),
+            rep(2, ser![
+                // Dm
+                d2e, d2e, d3e, d2e, a2e, d2e, d3e, a2e,
+                // Am
+                a1e, a1e, a2e, a1e, e2e, a1e, a2e, e2e,
+                // Bb
+                bf1e, bf1e, bf2e, bf1e, f2e, bf1e, bf2e, f2e,
+                // A (tension)
+                a1e, a1e, a2e, a1e, e2e, a1e, cs2e, e2e,
+            ]),
         ];
 
-        // Melody - ethereal choir
+        // Adventurous melody - DQ style heroic theme
         let melody = ser![
-            program(52), // Choir Aahs
+            program(GM::SquareLead),
             channel(1),
-            rh,
-            d4h, e4q, f4q,
-            e4h, d4q, c4q,
-            d4w,
-            rh,
-            a4qd, g4e, f4q, e4q,
-            d4h, e4h,
-            d4w,
+            velocity(0.8),
+            // First phrase
+            d5q, f5e, e5e, d5q, a4q,
+            bf4q, a4e, g4e, a4h,
+            // Second phrase
+            d5q, f5e, g5e, a5h,
+            g5q, f5e, e5e, d5h,
+            // Third phrase - higher energy
+            a5q, a5e, g5e, f5q, e5q,
+            d5q, e5e, f5e, e5q, d5q,
+            // Resolution
+            a4q, bf4e, a4e, g4q, a4q,
+            d5w,
         ];
 
-        // Pad - warm sustained chords
-        let pad = ser![
-            program(89), // Pad (warm)
+        // Counter melody - arpeggiated chords
+        let counter = ser![
+            program(GM::SawtoothLead),
             channel(2),
-            par![d3w, f3w, a3w],   // Dm
-            par![a2w, c3w, e3w],   // Am
-            par![f2w, a2w, c3w],   // F
-            par![g2w, bf2w, d3w],  // Gm
-            par![d3w, f3w, a3w],   // Dm
-            par![bf2w, d3w, f3w],  // Bb
-            par![a2w, c3w, e3w],   // Am
-            par![a2w, cs3w, e3w],  // A (tension/resolution)
+            velocity(0.5),
+            rep(2, ser![
+                // Dm arpeggio
+                d4i, f4i, a4i, f4i, d4i, f4i, a4i, f4i,
+                d4i, f4i, a4i, f4i, d4i, f4i, a4i, f4i,
+                // Am arpeggio
+                a3i, c4i, e4i, c4i, a3i, c4i, e4i, c4i,
+                a3i, c4i, e4i, c4i, a3i, c4i, e4i, c4i,
+                // Bb arpeggio
+                bf3i, d4i, f4i, d4i, bf3i, d4i, f4i, d4i,
+                bf3i, d4i, f4i, d4i, bf3i, d4i, f4i, d4i,
+                // A arpeggio
+                a3i, cs4i, e4i, cs4i, a3i, cs4i, e4i, cs4i,
+                a3i, cs4i, e4i, cs4i, a3i, cs4i, e4i, cs4i,
+            ]),
         ];
 
         ser![
-            tempo(70.0),
-            par![bass, melody, pad],
+            tempo(128.0),
+            par![drums, bass, melody, counter],
         ]
     }
 
     /// Intense combat music - driving rhythm in E minor
     pub fn combat() -> Note {
         let drums = ser![
-            program(47), // Timpani
+            program(GM::Timpani),
             channel(9),
             rep(4, ser![
                 c2q, re, c2e,
@@ -2273,7 +2489,7 @@ pub mod compositions {
         ];
 
         let bass = ser![
-            program(33), // Acoustic Bass
+            program(GM::ElectricBassFinger),
             rep(4, ser![
                 e2e, e2e, e2e, e2e,
                 e2e, g2e, e2e, b1e,
@@ -2281,7 +2497,7 @@ pub mod compositions {
         ];
 
         let melody = ser![
-            program(48), // Strings
+            program(GM::StringEnsemble1),
             channel(1),
             e4q, g4e, a4e, b4h,
             a4q, g4q, e4h,
@@ -2299,7 +2515,7 @@ pub mod compositions {
     pub fn victory() -> Note {
         ser![
             tempo(120.0),
-            program(56), // Trumpet
+            program(GM::Trumpet),
             g4e, g4e, g4e, g4qd,
             ef4h,
             g4e, g4e, g4e, g4qd,
@@ -2311,7 +2527,7 @@ pub mod compositions {
     pub fn game_over() -> Note {
         ser![
             tempo(60.0),
-            program(48), // Strings
+            program(GM::StringEnsemble1),
             par![a3h, c4h, e4h],
             par![g3h, b3h, d4h],
             par![f3h, a3h, c4h],
@@ -2323,7 +2539,7 @@ pub mod compositions {
     pub fn discovery() -> Note {
         ser![
             tempo(100.0),
-            program(46), // Harp
+            program(GM::OrchestralHarp),
             c4i, e4i, g4i, c5i,
             e5i, g5i, c6q,
         ]
@@ -2332,7 +2548,7 @@ pub mod compositions {
     /// Shop/safe room music - calm and pleasant
     pub fn shop() -> Note {
         let melody = ser![
-            program(73), // Flute
+            program(GM::Flute),
             c5q, e5q, g5q, e5q,
             f5q, a5q, g5h,
             e5q, g5q, c6h,
@@ -2340,7 +2556,7 @@ pub mod compositions {
         ];
 
         let chords = ser![
-            program(0), // Piano
+            program(GM::AcousticGrandPiano),
             channel(1),
             par![c4h, e4h, g4h],
             par![f4h, a4h, c5h],
@@ -2358,7 +2574,7 @@ pub mod compositions {
     pub fn advanced_demo() -> Note {
         ser![
             tempo(100.0),
-            program(0), // Piano
+            program(GM::AcousticGrandPiano),
             comment!("Main theme"),
 
             // Use forkseq to layer a sustained note under a melody
