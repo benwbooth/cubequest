@@ -118,32 +118,87 @@ fn triangle_params(duration: f32) -> SynthParams {
 // SOUND EFFECT COMPOSITIONS
 // =============================================================================
 
-/// Hit sound: Noise + low square wave at 100Hz with fast decay
+/// Sword slash sound: High-to-low sweep ending in a satisfying crunch/thud
 pub fn hit_composition() -> Note {
-    // Duration: 0.1s = at 600 BPM, a quarter note is 0.1s
-    // 100Hz freq (G2 = 98Hz is close)
     ser![
-        tempo(600.0),
+        tempo(400.0), // Quarter = 0.15s
         par![
-            // Noise layer
+            // Main sweep - periodic noise high to low
             ser![
                 patch("noise"),
-                freq(60.0, Duration::Quarter),  // pitch doesn't matter for noise
+                noise_type("periodic"),
+                sweep(6000.0, 150.0, Duration::Quarter),
             ],
-            // Square wave at 100Hz
+            // Ending thud - low square hit delayed slightly
             ser![
+                rq, // Rest for half the duration
                 patch("square"),
-                freq(100.0, Duration::Quarter),
+                freq(80.0, Duration::Eighth),
+            ],
+            // Crunch layer - white noise burst at the end
+            ser![
+                rq,
+                patch("noise"),
+                freq(100.0, Duration::Eighth),
             ],
         ]
     ]
 }
 
+fn sweep_noise_params() -> SynthParams {
+    SynthParams {
+        waveform: Waveform::Noise,
+        noise_type: NoiseType::Periodic,
+        envelope: ADSREnvelope {
+            attack_time: 0.002,
+            decay_time: 0.12,
+            sustain_level: 0.1,
+            release_time: 0.02,
+        },
+        volume: 0.6,
+        duty: 0.5,
+    }
+}
+
+fn thud_params() -> SynthParams {
+    SynthParams {
+        waveform: Waveform::Square,
+        envelope: ADSREnvelope {
+            attack_time: 0.001,
+            decay_time: 0.06,
+            sustain_level: 0.0,
+            release_time: 0.02,
+        },
+        volume: 0.5,
+        duty: 0.5,
+        noise_type: NoiseType::White,
+    }
+}
+
+fn crunch_params() -> SynthParams {
+    SynthParams {
+        waveform: Waveform::Noise,
+        noise_type: NoiseType::White,
+        envelope: ADSREnvelope {
+            attack_time: 0.001,
+            decay_time: 0.04,
+            sustain_level: 0.0,
+            release_time: 0.01,
+        },
+        volume: 0.4,
+        duty: 0.5,
+    }
+}
+
 /// Hit sound rendered to samples
 pub fn hit() -> Vec<f32> {
     render_layered(&[
-        (ser![tempo(600.0), freq(60.0, Duration::Quarter)], noise_params(0.1)),
-        (ser![tempo(600.0), freq(100.0, Duration::Quarter)], square_params(0.1)),
+        // Periodic noise sweep high→low (the main "SHHWIK")
+        (ser![tempo(400.0), sweep(6000.0, 150.0, Duration::Quarter)], sweep_noise_params()),
+        // Low thud at the end
+        (ser![tempo(400.0), re, freq(80.0, Duration::Eighth)], thud_params()),
+        // White noise crunch at the end
+        (ser![tempo(400.0), re, freq(100.0, Duration::Eighth)], crunch_params()),
     ])
 }
 

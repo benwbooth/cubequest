@@ -37,6 +37,9 @@ pub mod synth;
 // Sound effects module
 pub mod sfx;
 
+// DSP effects module
+pub mod dsp;
+
 // =============================================================================
 // CORE TYPES
 // =============================================================================
@@ -493,6 +496,7 @@ pub enum ParamValue {
     Text(String),
     Note(Box<Note>),       // For macro invocation
     Envelope(Envelope),    // For envelope-based modulation
+    Effects(Vec<dsp::EffectConfig>), // DSP effects for channel
     Unset,                 // Removes parameter from context
 }
 
@@ -701,7 +705,7 @@ pub fn forkpar<I: IntoIterator<Item = Note>>(notes: I) -> Note {
 #[macro_export]
 macro_rules! ser {
     [$($note:expr),* $(,)?] => {
-        $crate::ser(vec![$($note),*])
+        $crate::ser(vec![$(std::clone::Clone::clone(&$note)),*])
     };
 }
 
@@ -709,7 +713,7 @@ macro_rules! ser {
 #[macro_export]
 macro_rules! par {
     [$($note:expr),* $(,)?] => {
-        $crate::par(vec![$($note),*])
+        $crate::par(vec![$(std::clone::Clone::clone(&$note)),*])
     };
 }
 
@@ -717,7 +721,7 @@ macro_rules! par {
 #[macro_export]
 macro_rules! parmin {
     [$($note:expr),* $(,)?] => {
-        $crate::parmin(vec![$($note),*])
+        $crate::parmin(vec![$(std::clone::Clone::clone(&$note)),*])
     };
 }
 
@@ -725,7 +729,7 @@ macro_rules! parmin {
 #[macro_export]
 macro_rules! forkseq {
     [$($note:expr),* $(,)?] => {
-        $crate::forkseq(vec![$($note),*])
+        $crate::forkseq(vec![$(std::clone::Clone::clone(&$note)),*])
     };
 }
 
@@ -733,7 +737,7 @@ macro_rules! forkseq {
 #[macro_export]
 macro_rules! forkpar {
     [$($note:expr),* $(,)?] => {
-        $crate::forkpar(vec![$($note),*])
+        $crate::forkpar(vec![$(std::clone::Clone::clone(&$note)),*])
     };
 }
 
@@ -741,7 +745,15 @@ macro_rules! forkpar {
 #[macro_export]
 macro_rules! forkser {
     [$($note:expr),* $(,)?] => {
-        $crate::forkseq(vec![$($note),*])
+        $crate::forkseq(vec![$(std::clone::Clone::clone(&$note)),*])
+    };
+}
+
+/// Repeat macro: `rep![3, c4q, d4q]` repeats the sequence 3 times
+#[macro_export]
+macro_rules! rep {
+    [$times:expr, $($note:expr),* $(,)?] => {
+        $crate::rep($times, $crate::ser(vec![$(std::clone::Clone::clone(&$note)),*]))
     };
 }
 
@@ -1461,6 +1473,26 @@ pub fn time_note(note: u8) -> Note {
     }
 }
 
+/// Set pitch bend range in semitones (default 24 = 2 octaves)
+/// This sends MIDI RPN messages to configure the synth's pitch bend sensitivity.
+/// Common values: 2 (standard MIDI), 12 (one octave), 24 (two octaves)
+pub fn pitch_bend_range(semitones: u8) -> Note {
+    Note::Param {
+        key: "pitch_bend_range".to_string(),
+        value: ParamValue::Number(semitones as f32),
+    }
+}
+
+/// Set DSP effects for the current channel
+/// Effects are applied in order during rendering
+/// Example: effects(vec![dsp::distortion(8.0, 0.7), dsp::chorus(0.8, 0.5, 0.3)])
+pub fn effects(effect_list: Vec<dsp::EffectConfig>) -> Note {
+    Note::Param {
+        key: "effects".to_string(),
+        value: ParamValue::Effects(effect_list),
+    }
+}
+
 /// Set a macro to play with notes
 pub fn set_macro(macro_note: Note) -> Note {
     Note::Param {
@@ -1609,6 +1641,8 @@ pub enum MidiEventType {
     ControlChange { controller: u8, value: u8 },
     PitchBend { value: u16 }, // 14-bit value, 8192 = center
     Comment(String),
+    /// Channel effects configuration (for DSP processing)
+    ChannelEffects { effects: Vec<dsp::EffectConfig> },
 }
 
 // =============================================================================
@@ -1650,6 +1684,10 @@ pub struct Params {
     pub release_envelope: Option<Envelope>,
     pub release_duration: f32,
     pub envelope_preset: Option<String>,
+    // Pitch bend envelope (semitones) - applied to next note only
+    pub pitch_envelope: Option<Envelope>,
+    // Pitch bend range in semitones (default 24, max bendable interval)
+    pub pitch_bend_range: f32,
 }
 
 impl Default for Params {
@@ -1676,6 +1714,8 @@ impl Default for Params {
             release_envelope: None,
             release_duration: 0.1,
             envelope_preset: None,
+            pitch_envelope: None,
+            pitch_bend_range: 24.0, // ±24 semitones (2 octaves)
         }
     }
 }
@@ -1780,6 +1820,59 @@ async fn generate_events_recursive_with_offset(
             let vel_byte = (velocity * params.velocity * 127.0).clamp(0.0, 127.0) as u8;
             let gate_dur = dur_secs * params.gate;
 
+            // Generate pitch bend events if there's a pitch envelope
+            if let Some(pitch_env) = params.pitch_envelope.take() {
+                // Generate pitch bends throughout the note
+                let num_steps = 32; // Resolution of pitch bend
+                let mut current_pitch_value = 0.0_f32;
+
+                for step in 0..=num_steps {
+                    let progress = step as f32 / num_steps as f32;
+                    let time_in_note = progress * dur_secs;
+
+                    // Evaluate envelope at this time point
+                    let mut accumulated_time = 0.0;
+                    let mut pitch_value = 0.0_f32;
+                    let mut last_value = 0.0_f32;
+
+                    for point in &pitch_env.points {
+                        let point_dur = point.duration.to_seconds(params.tempo, params.time_note, Some(dur_secs));
+                        let point_value = if point.relative {
+                            last_value + point.value
+                        } else {
+                            point.value
+                        };
+
+                        if time_in_note <= accumulated_time + point_dur {
+                            // Interpolate within this segment
+                            let segment_t = if point_dur > 0.0 {
+                                (time_in_note - accumulated_time) / point_dur
+                            } else {
+                                1.0
+                            };
+                            pitch_value = last_value + (point_value - last_value) * segment_t;
+                            break;
+                        }
+
+                        accumulated_time += point_dur;
+                        last_value = point_value;
+                        pitch_value = point_value;
+                    }
+
+                    // Only emit pitch bend if value changed significantly
+                    if (pitch_value - current_pitch_value).abs() > 0.01 || step == 0 {
+                        current_pitch_value = pitch_value;
+                        // Use params.pitch_bend_range to match RPN pitch bend sensitivity setting
+                        let bend_value = semitones_to_pitch_bend(pitch_value, params.pitch_bend_range);
+                        co.yield_(MidiEvent {
+                            time: start_time + time_offset + time_in_note,
+                            channel: params.channel,
+                            event_type: MidiEventType::PitchBend { value: bend_value },
+                        }).await;
+                    }
+                }
+            }
+
             // Yield NoteOn
             co.yield_(MidiEvent {
                 time: start_time + time_offset,
@@ -1792,6 +1885,13 @@ async fn generate_events_recursive_with_offset(
                 time: start_time + time_offset + gate_dur,
                 channel: params.channel,
                 event_type: MidiEventType::NoteOff { note: transposed_midi },
+            }).await;
+
+            // Reset pitch bend after note
+            co.yield_(MidiEvent {
+                time: start_time + time_offset + gate_dur + 0.001,
+                channel: params.channel,
+                event_type: MidiEventType::PitchBend { value: 8192 }, // Center (no bend)
             }).await;
 
             // Handle macro invocation
@@ -1953,6 +2053,53 @@ async fn generate_events_recursive_with_offset(
                     params.envelope_preset = None;
                 }
 
+                // Pitch bend envelope (applied to next note only)
+                ("pitch", ParamValue::Envelope(pitch_env)) => {
+                    params.pitch_envelope = Some(pitch_env.clone());
+                }
+                ("pitch", ParamValue::Unset) => {
+                    params.pitch_envelope = None;
+                }
+
+                // Pitch bend range (sends RPN to configure synth)
+                ("pitch_bend_range", ParamValue::Number(v)) => {
+                    params.pitch_bend_range = *v;
+                    let semitones = *v as u8;
+                    // Send RPN messages to set pitch bend sensitivity
+                    // CC101 = 0 (RPN MSB), CC100 = 0 (RPN LSB) = Pitch Bend Sensitivity
+                    co.yield_(MidiEvent {
+                        time: start_time + time_offset,
+                        channel: params.channel,
+                        event_type: MidiEventType::ControlChange { controller: 101, value: 0 },
+                    }).await;
+                    co.yield_(MidiEvent {
+                        time: start_time + time_offset,
+                        channel: params.channel,
+                        event_type: MidiEventType::ControlChange { controller: 100, value: 0 },
+                    }).await;
+                    // CC6 = Data Entry MSB (semitones)
+                    co.yield_(MidiEvent {
+                        time: start_time + time_offset,
+                        channel: params.channel,
+                        event_type: MidiEventType::ControlChange { controller: 6, value: semitones },
+                    }).await;
+                    // CC38 = Data Entry LSB (cents, we use 0)
+                    co.yield_(MidiEvent {
+                        time: start_time + time_offset,
+                        channel: params.channel,
+                        event_type: MidiEventType::ControlChange { controller: 38, value: 0 },
+                    }).await;
+                }
+
+                // DSP effects for channel
+                ("effects", ParamValue::Effects(effect_list)) => {
+                    co.yield_(MidiEvent {
+                        time: start_time + time_offset,
+                        channel: params.channel,
+                        event_type: MidiEventType::ChannelEffects { effects: effect_list.clone() },
+                    }).await;
+                }
+
                 // Note macro
                 ("macro", ParamValue::Note(n)) => {
                     params.active_macro = Some(n.clone());
@@ -2102,7 +2249,7 @@ async fn generate_events_recursive_with_offset(
             let gate_dur = dur_secs * params.gate;
 
             // Find nearest MIDI note and calculate pitch bend compensation
-            let (midi_note, bend_value) = freq_to_midi_with_bend(*frequency, 48.0);
+            let (midi_note, bend_value) = freq_to_midi_with_bend(*frequency, params.pitch_bend_range);
             let transposed_midi = (midi_note as i16 + params.transpose as i16).clamp(0, 127) as u8;
 
             // Set pitch bend first
@@ -2143,7 +2290,7 @@ async fn generate_events_recursive_with_offset(
             let gate_dur = dur_secs * params.gate;
 
             // Find nearest MIDI note to start frequency
-            let (midi_note, initial_bend) = freq_to_midi_with_bend(*start_freq, 48.0);
+            let (midi_note, initial_bend) = freq_to_midi_with_bend(*start_freq, params.pitch_bend_range);
             let transposed_midi = (midi_note as i16 + params.transpose as i16).clamp(0, 127) as u8;
             let base_freq = midi_to_freq(midi_note);
 
@@ -2168,7 +2315,7 @@ async fn generate_events_recursive_with_offset(
                 // Exponential interpolation for natural-sounding sweep
                 let current_freq = start_freq * (end_freq / start_freq).powf(progress);
                 let semitones_from_base = 12.0 * (current_freq / base_freq).log2();
-                let bend_value = semitones_to_pitch_bend(semitones_from_base, 48.0);
+                let bend_value = semitones_to_pitch_bend(semitones_from_base, params.pitch_bend_range);
 
                 co.yield_(MidiEvent {
                     time: start_time + time_offset + (progress * dur_secs),
@@ -2235,12 +2382,38 @@ pub fn events_to_midi(events: &[MidiEvent]) -> Vec<u8> {
     track.push((tempo_us >> 8) as u8);
     track.push(tempo_us as u8);
 
+    // Set pitch bend range to 24 semitones for all channels (0-15)
+    // This allows bends up to 2 octaves, matching our 48 semitone total range
+    // RPN sequence: CC101=0, CC100=0 (select pitch bend sensitivity), CC6=24 (semitones), CC38=0 (cents)
+    for channel in 0..16u8 {
+        // Delta time 0 for all these setup messages
+        track.push(0x00);
+        track.push(0xB0 | channel); // Control Change
+        track.push(101); // RPN MSB
+        track.push(0);   // Pitch bend sensitivity
+
+        track.push(0x00);
+        track.push(0xB0 | channel);
+        track.push(100); // RPN LSB
+        track.push(0);
+
+        track.push(0x00);
+        track.push(0xB0 | channel);
+        track.push(6);   // Data Entry MSB
+        track.push(24);  // 24 semitones = 2 octaves
+
+        track.push(0x00);
+        track.push(0xB0 | channel);
+        track.push(38);  // Data Entry LSB
+        track.push(0);   // 0 cents
+    }
+
     let mut last_tick = 0u32;
     let ticks_per_sec = (ticks_per_quarter as f32) * 2.0;
 
     for event in events {
-        // Skip comments in MIDI output
-        if matches!(event.event_type, MidiEventType::Comment(_)) {
+        // Skip non-MIDI events (comments and DSP effects)
+        if matches!(event.event_type, MidiEventType::Comment(_) | MidiEventType::ChannelEffects { .. }) {
             continue;
         }
 
@@ -2279,6 +2452,7 @@ pub fn events_to_midi(events: &[MidiEvent]) -> Vec<u8> {
                 track.push(msb);
             }
             MidiEventType::Comment(_) => {}
+            MidiEventType::ChannelEffects { .. } => {} // Handled separately by renderer
         }
     }
 
@@ -2319,6 +2493,41 @@ pub fn compose_to_midi(composition: &Note, tempo: f32) -> Vec<u8> {
     events_to_midi(&events)
 }
 
+/// Extract per-channel effect configurations from events
+/// Returns a HashMap of channel -> Vec<EffectConfig>
+pub fn extract_channel_effects(events: &[MidiEvent]) -> std::collections::HashMap<u8, Vec<dsp::EffectConfig>> {
+    let mut effects_map = std::collections::HashMap::new();
+
+    for event in events {
+        if let MidiEventType::ChannelEffects { effects } = &event.event_type {
+            // Use the last effects declaration for each channel
+            effects_map.insert(event.channel, effects.clone());
+        }
+    }
+
+    effects_map
+}
+
+/// Get set of channels that have effects configured
+pub fn channels_with_effects(events: &[MidiEvent]) -> std::collections::HashSet<u8> {
+    events.iter()
+        .filter_map(|ev| {
+            if matches!(ev.event_type, MidiEventType::ChannelEffects { .. }) {
+                Some(ev.channel)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Convenience: Generate events and extract effects in one call
+pub fn note_to_events_with_effects(composition: &Note, tempo: f32) -> (Vec<MidiEvent>, std::collections::HashMap<u8, Vec<dsp::EffectConfig>>) {
+    let events = note_to_events(composition, tempo);
+    let effects = extract_channel_effects(&events);
+    (events, effects)
+}
+
 // =============================================================================
 // PRELUDE - convenient imports
 // =============================================================================
@@ -2336,7 +2545,7 @@ pub mod prelude {
         // Frequency/sweep functions
         freq, freq_vel, sweep, sweep_vel,
         // Parameter functions
-        tempo, channel, program, velocity, gate, transpose, key, time_note, GM,
+        tempo, channel, program, velocity, gate, transpose, key, time_note, pitch_bend_range, GM,
         set_macro, clear_macro,
         // Synthesis parameters
         patch, duty, noise_type, instrument, volume,
@@ -2351,6 +2560,8 @@ pub mod prelude {
         midi_to_freq, freq_to_midi_with_bend, semitones_to_pitch_bend,
         // MIDI generation
         compose_to_midi, note_to_events, events_to_midi,
+        extract_channel_effects, channels_with_effects, note_to_events_with_effects,
+        effects,
         // Generator support
         yield_,
     };
@@ -2383,6 +2594,15 @@ pub mod prelude {
     // Re-export sfx module
     pub use crate::sfx::SfxLibrary;
 
+    // Re-export dsp module
+    pub use crate::dsp::{
+        Effect, EffectConfig, EffectChain, ChannelEffects,
+        Distortion, Delay, Chorus, Flanger, Reverb, Filter, FilterType,
+        // Effect config builders for use in effects![]
+        distortion, distortion_full, delay, chorus, flanger, reverb,
+        lowpass, highpass, bandpass,
+    };
+
     // Note: For note constants (c4q, d4h, etc.), rests (rq, rh, etc.),
     // duration ties (w, h, q, etc.), and previous pitch (p, pq, ph, etc.),
     // use `use music::*` in a local scope or import specific notes
@@ -2396,84 +2616,171 @@ pub mod compositions {
     use crate::*;
 
     /// Upbeat dungeon exploration music - Dragon Quest inspired adventure in D minor
+    /// Structured bar-by-bar to ensure all parts stay synchronized
     pub fn dungeon_ambient() -> Note {
-        // Driving drum beat - kick and snare pattern
-        let drums = ser![
-            program(GM::AcousticGrandPiano), // Ignored on drum channel
-            channel(9), // Percussion channel
-            velocity(0.9),
-            rep(8, ser![
-                // Kick on 1 and 3, snare on 2 and 4, hi-hat throughout
-                par![c2e, fs2e],  // Kick + closed hi-hat
-                fs2e,              // Hi-hat
-                par![d2e, fs2e],  // Snare + hi-hat
-                fs2e,              // Hi-hat
-                par![c2e, fs2e],  // Kick + hi-hat
-                fs2e,              // Hi-hat
-                par![d2e, fs2e],  // Snare + hi-hat
-                as2e,              // Open hi-hat
-            ]),
-        ];
+        // Track definitions (channel, program, velocity, effects)
+        let drums = ser![channel(9), velocity(0.9)];
+        let bass = ser![channel(0), program(GM::SynthBass1), velocity(0.85)];
+        let melody = ser![channel(1), program(GM::SquareLead), velocity(0.8)];
+        let pad = ser![channel(2), program(GM::SawtoothLead), velocity(0.5)];
+        let guitar = ser![channel(3), program(GM::DistortionGuitar), velocity(0.6),
+                         effects(vec![dsp::distortion(100.0, 1.0)])];
 
-        // Punchy arpeggiated bass line
-        let bass = ser![
-            program(GM::SynthBass1),
-            velocity(0.85),
-            rep(2, ser![
-                // Dm
-                d2e, d2e, d3e, d2e, a2e, d2e, d3e, a2e,
-                // Am
-                a1e, a1e, a2e, a1e, e2e, a1e, a2e, e2e,
-                // Bb
-                bf1e, bf1e, bf2e, bf1e, f2e, bf1e, bf2e, f2e,
-                // A (tension)
-                a1e, a1e, a2e, a1e, e2e, a1e, cs2e, e2e,
-            ]),
-        ];
-
-        // Adventurous melody - DQ style heroic theme
-        let melody = ser![
-            program(GM::SquareLead),
-            channel(1),
-            velocity(0.8),
-            // First phrase
-            d5q, f5e, e5e, d5q, a4q,
-            bf4q, a4e, g4e, a4h,
-            // Second phrase
-            d5q, f5e, g5e, a5h,
-            g5q, f5e, e5e, d5h,
-            // Third phrase - higher energy
-            a5q, a5e, g5e, f5q, e5q,
-            d5q, e5e, f5e, e5q, d5q,
-            // Resolution
-            a4q, bf4e, a4e, g4q, a4q,
-            d5w,
-        ];
-
-        // Counter melody - arpeggiated chords
-        let counter = ser![
-            program(GM::SawtoothLead),
-            channel(2),
-            velocity(0.5),
-            rep(2, ser![
-                // Dm arpeggio
-                d4i, f4i, a4i, f4i, d4i, f4i, a4i, f4i,
-                d4i, f4i, a4i, f4i, d4i, f4i, a4i, f4i,
-                // Am arpeggio
-                a3i, c4i, e4i, c4i, a3i, c4i, e4i, c4i,
-                a3i, c4i, e4i, c4i, a3i, c4i, e4i, c4i,
-                // Bb arpeggio
-                bf3i, d4i, f4i, d4i, bf3i, d4i, f4i, d4i,
-                bf3i, d4i, f4i, d4i, bf3i, d4i, f4i, d4i,
-                // A arpeggio
-                a3i, cs4i, e4i, cs4i, a3i, cs4i, e4i, cs4i,
-                a3i, cs4i, e4i, cs4i, a3i, cs4i, e4i, cs4i,
-            ]),
-        ];
+        // Drum pattern (same every bar)
+        let drm = ser![par![c2e, fs2e], fs2e, par![d2e, fs2e], fs2e, par![c2e, fs2e], fs2e, par![d2e, fs2e], as2e];
 
         ser![
             tempo(128.0),
-            par![drums, bass, melody, counter],
+
+            // === BARS 1-8: Groove establishes, guitar rests ===
+            par![ // Bar 1: Dm
+                ser![drums, drm],
+                ser![bass, d2e, d2e, d3e, d2e, a2e, d2e, d3e, a2e],
+                ser![melody, d5q, f5e, e5e, d5q, a4q],
+                ser![pad, d4i, f4i, a4i, f4i, d4i, f4i, a4i, f4i],
+                ser![guitar, rw]],
+            par![ // Bar 2: Am
+                ser![drums, drm],
+                ser![bass, a1e, a1e, a2e, a1e, e2e, a1e, a2e, e2e],
+                ser![melody, bf4q, a4e, g4e, a4h],
+                ser![pad, d4i, f4i, a4i, f4i, d4i, f4i, a4i, f4i],
+                ser![guitar, rw]],
+            par![ // Bar 3: Bb
+                ser![drums, drm],
+                ser![bass, bf1e, bf1e, bf2e, bf1e, f2e, bf1e, bf2e, f2e],
+                ser![melody, d5q, f5e, g5e, a5h],
+                ser![pad, a3i, c4i, e4i, c4i, a3i, c4i, e4i, c4i],
+                ser![guitar, rw]],
+            par![ // Bar 4: A
+                ser![drums, drm],
+                ser![bass, a1e, a1e, a2e, a1e, e2e, a1e, cs2e, e2e],
+                ser![melody, g5q, f5e, e5e, d5h],
+                ser![pad, a3i, c4i, e4i, c4i, a3i, c4i, e4i, c4i],
+                ser![guitar, rw]],
+            par![ // Bar 5: Dm
+                ser![drums, drm],
+                ser![bass, d2e, d2e, d3e, d2e, a2e, d2e, d3e, a2e],
+                ser![melody, a5q, a5e, g5e, f5q, e5q],
+                ser![pad, bf3i, d4i, f4i, d4i, bf3i, d4i, f4i, d4i],
+                ser![guitar, rw]],
+            par![ // Bar 6: Am
+                ser![drums, drm],
+                ser![bass, a1e, a1e, a2e, a1e, e2e, a1e, a2e, e2e],
+                ser![melody, d5q, e5e, f5e, e5q, d5q],
+                ser![pad, bf3i, d4i, f4i, d4i, bf3i, d4i, f4i, d4i],
+                ser![guitar, rw]],
+            par![ // Bar 7: Bb
+                ser![drums, drm],
+                ser![bass, bf1e, bf1e, bf2e, bf1e, f2e, bf1e, bf2e, f2e],
+                ser![melody, a4q, bf4e, a4e, g4q, a4q],
+                ser![pad, a3i, cs4i, e4i, cs4i, a3i, cs4i, e4i, cs4i],
+                ser![guitar, rw]],
+            par![ // Bar 8: A
+                ser![drums, drm],
+                ser![bass, a1e, a1e, a2e, a1e, e2e, a1e, cs2e, e2e],
+                ser![melody, d5w],
+                ser![pad, a3i, cs4i, e4i, cs4i, a3i, cs4i, e4i, cs4i],
+                ser![guitar, rw]],
+
+            // === BARS 9-16: Guitar solo begins ===
+            par![ // Bar 9: opening scream
+                ser![drums, drm],
+                ser![bass, d2e, d2e, d3e, d2e, a2e, d2e, d3e, a2e],
+                ser![melody, d5q, f5e, e5e, d5q, a4q],
+                ser![pad, d4i, f4i, a4i, f4i, d4i, f4i, a4i, f4i],
+                ser![guitar, d5w!(pitch=env!(i0, h7, h7))]],  // 5th bend
+            par![ // Bar 10: arp + bend
+                ser![drums, drm],
+                ser![bass, a1e, a1e, a2e, a1e, e2e, a1e, a2e, e2e],
+                ser![melody, bf4q, a4e, g4e, a4h],
+                ser![pad, d4i, f4i, a4i, f4i, d4i, f4i, a4i, f4i],
+                ser![guitar, d4i, f4i, a4i, d5i, a5h!(pitch=env!(i0, q3, q3))]],
+            par![ // Bar 11: Gm arp + bend
+                ser![drums, drm],
+                ser![bass, bf1e, bf1e, bf2e, bf1e, f2e, bf1e, bf2e, f2e],
+                ser![melody, d5q, f5e, g5e, a5h],
+                ser![pad, a3i, c4i, e4i, c4i, a3i, c4i, e4i, c4i],
+                ser![guitar, g4i, bf4i, d5i, g5i, d6h!(pitch=env!(i0, q4, q4))]],
+            par![ // Bar 12: dim run
+                ser![drums, drm],
+                ser![bass, a1e, a1e, a2e, a1e, e2e, a1e, cs2e, e2e],
+                ser![melody, g5q, f5e, e5e, d5h],
+                ser![pad, a3i, c4i, e4i, c4i, a3i, c4i, e4i, c4i],
+                ser![guitar, cs5i, e5i, g5i, bf5i, cs6h!(pitch=env!(i0, q3, q0))]],
+            par![ // Bar 13: dim run
+                ser![drums, drm],
+                ser![bass, d2e, d2e, d3e, d2e, a2e, d2e, d3e, a2e],
+                ser![melody, a5q, a5e, g5e, f5q, e5q],
+                ser![pad, bf3i, d4i, f4i, d4i, bf3i, d4i, f4i, d4i],
+                ser![guitar, e5i, g5i, bf5i, cs6i, e6h!(pitch=env!(i0, q4, q0))]],
+            par![ // Bar 14: crying bends
+                ser![drums, drm],
+                ser![bass, a1e, a1e, a2e, a1e, e2e, a1e, a2e, e2e],
+                ser![melody, d5q, e5e, f5e, e5q, d5q],
+                ser![pad, bf3i, d4i, f4i, d4i, bf3i, d4i, f4i, d4i],
+                ser![guitar, d5h!(pitch=env!(i0, q3, e3, e0)), f5h!(pitch=env!(i0, q4, e4, e0))]],
+            par![ // Bar 15: crying bends
+                ser![drums, drm],
+                ser![bass, bf1e, bf1e, bf2e, bf1e, f2e, bf1e, bf2e, f2e],
+                ser![melody, a4q, bf4e, a4e, g4q, a4q],
+                ser![pad, a3i, cs4i, e4i, cs4i, a3i, cs4i, e4i, cs4i],
+                ser![guitar, a5h!(pitch=env!(i0, q7, e7, e0)), d6h!(pitch=env!(i0, q5, q5))]],
+            par![ // Bar 16: scalar run
+                ser![drums, drm],
+                ser![bass, a1e, a1e, a2e, a1e, e2e, a1e, cs2e, e2e],
+                ser![melody, d5w],
+                ser![pad, a3i, cs4i, e4i, cs4i, a3i, cs4i, e4i, cs4i],
+                ser![guitar, d5i, e5i, f5i, g5i, a5i, bf5i, cs6i, d6i]],
+
+            // === BARS 17-24: Guitar solo climax ===
+            par![ // Bar 17: descending
+                ser![drums, drm],
+                ser![bass, d2e, d2e, d3e, d2e, a2e, d2e, d3e, a2e],
+                ser![melody, d5q, f5e, e5e, d5q, a4q],
+                ser![pad, d4i, f4i, a4i, f4i, d4i, f4i, a4i, f4i],
+                ser![guitar, d6i, cs6i, bf5q!(pitch=env!(i0, i3, i3)), a5i, g5i, f5q]],
+            par![ // Bar 18: pedal point
+                ser![drums, drm],
+                ser![bass, a1e, a1e, a2e, a1e, e2e, a1e, a2e, e2e],
+                ser![melody, bf4q, a4e, g4e, a4h],
+                ser![pad, d4i, f4i, a4i, f4i, d4i, f4i, a4i, f4i],
+                ser![guitar, d3q, a5q!(pitch=env!(i0, i7, i7)), d3q, f5q!(pitch=env!(i0, i5, i5))]],
+            par![ // Bar 19: pedal point
+                ser![drums, drm],
+                ser![bass, bf1e, bf1e, bf2e, bf1e, f2e, bf1e, bf2e, f2e],
+                ser![melody, d5q, f5e, g5e, a5h],
+                ser![pad, a3i, c4i, e4i, c4i, a3i, c4i, e4i, c4i],
+                ser![guitar, d3q, d5q!(pitch=env!(i0, i3, i3)), d3q, a5q!(pitch=env!(i0, q7, q7))]],
+            par![ // Bar 20: sweep
+                ser![drums, drm],
+                ser![bass, a1e, a1e, a2e, a1e, e2e, a1e, cs2e, e2e],
+                ser![melody, g5q, f5e, e5e, d5h],
+                ser![pad, a3i, c4i, e4i, c4i, a3i, c4i, e4i, c4i],
+                ser![guitar, d4i, f4i, a4i, d5i, a5h!(pitch=env!(i0, q4, q0))]],
+            par![ // Bar 21: sweep
+                ser![drums, drm],
+                ser![bass, d2e, d2e, d3e, d2e, a2e, d2e, d3e, a2e],
+                ser![melody, a5q, a5e, g5e, f5q, e5q],
+                ser![pad, bf3i, d4i, f4i, d4i, bf3i, d4i, f4i, d4i],
+                ser![guitar, bf3i, d4i, f4i, bf4i, f5h!(pitch=env!(i0, q3, q0))]],
+            par![ // Bar 22: final scream
+                ser![drums, drm],
+                ser![bass, a1e, a1e, a2e, a1e, e2e, a1e, a2e, e2e],
+                ser![melody, d5q, e5e, f5e, e5q, d5q],
+                ser![pad, bf3i, d4i, f4i, d4i, bf3i, d4i, f4i, d4i],
+                ser![guitar, d6w!(pitch=env!(i0, q7, h7))]],
+            par![ // Bar 23: blazing run
+                ser![drums, drm],
+                ser![bass, bf1e, bf1e, bf2e, bf1e, f2e, bf1e, bf2e, f2e],
+                ser![melody, a4q, bf4e, a4e, g4q, a4q],
+                ser![pad, a3i, cs4i, e4i, cs4i, a3i, cs4i, e4i, cs4i],
+                ser![guitar, d6i, cs6i, bf5i, a5i, g5i, f5i, e5i, d5i]],
+            par![ // Bar 24: final bend + vibrato
+                ser![drums, drm],
+                ser![bass, a1e, a1e, a2e, a1e, e2e, a1e, cs2e, e2e],
+                ser![melody, d5w],
+                ser![pad, a3i, cs4i, e4i, cs4i, a3i, cs4i, e4i, cs4i],
+                ser![guitar, d5w!(pitch=env!(i0, q7, i8, i6, i8, i6, i7))]],
         ]
     }
 

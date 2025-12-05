@@ -471,6 +471,9 @@ impl BasicSynth {
                 self.pitch_bend = normalized * self.pitch_bend_range;
             }
             MidiEventType::Comment(_) => {}
+            MidiEventType::ChannelEffects { .. } => {
+                // Effects are handled externally via DSP processing
+            }
         }
     }
 
